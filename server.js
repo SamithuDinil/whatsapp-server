@@ -3,7 +3,7 @@ import cors from "cors";
 import pino from "pino";
 import QRCode from "qrcode";
 import admin from "firebase-admin";
-import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from "@whiskeysockets/baileys";
+import { makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from "@whiskeysockets/baileys";
 
 const PORT = Number(process.env.PORT || 8080);
 const AUTH_DIR = process.env.AUTH_DIR || "./auth";
@@ -24,6 +24,13 @@ const state = { status: "starting", qr: null, phone: "", sentToday: 0, day: new 
 let socket = null;
 let starting = false;
 const queue = [];
+const sentCache = new Map();
+
+const remember = (sent) => {
+  if (!sent?.key?.id || !sent.message) return;
+  sentCache.set(sent.key.id, sent.message);
+  if (sentCache.size > 500) sentCache.delete(sentCache.keys().next().value);
+};
 let draining = false;
 
 const rollDay = () => {
@@ -50,7 +57,7 @@ async function connect() {
   try {
     const { state: auth, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
-    socket = makeWASocket({ version, auth, logger, printQRInTerminal: false, browser: ["CampusFlow", "Chrome", "1.0"], syncFullHistory: false, markOnlineOnConnect: false });
+    socket = makeWASocket({ version, auth, logger, printQRInTerminal: false, browser: ["CampusFlow", "Chrome", "1.0"], syncFullHistory: false, markOnlineOnConnect: false, getMessage: async (key) => sentCache.get(key.id) });
     socket.ev.on("creds.update", saveCreds);
     socket.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -99,7 +106,7 @@ async function drain() {
       if (state.sentToday >= DAILY_LIMIT) throw new Error("Daily limit reached");
       const exists = await socket.onWhatsApp(job.jid);
       if (!exists?.[0]?.exists) throw new Error("Number is not on WhatsApp");
-      await socket.sendMessage(job.jid, { text: job.text });
+      remember(await socket.sendMessage(job.jid, { text: job.text }));
       state.sentToday += 1;
       job.resolve({ ok: true });
     } catch (error) {
